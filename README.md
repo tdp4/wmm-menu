@@ -6,6 +6,8 @@ This was written out of necessity to control starting multiple portable instance
 
 This has been written in python, and should be compiled using the included `build.bat` file.  The compiled version in `build` can then be copied to your OBS machine.
 
+![Sample View of Menu](docs/sample.png)
+
 ---
 
 # Voluntary AI Disclaimer
@@ -62,6 +64,9 @@ The compiled `dist\wmm-menu.exe` is a standalone Windows 10/11 (64-bit) executab
    - Once no other launched OBS instances remain open, any sync services that were stopped by the launcher are restarted automatically.
 
 ### Configuration Dialog (Gear Icon)
+
+![Sample Config Dialog](docs/config.png)
+
 - **Title**: Sets the window title bar and header text for the current YAML config.
 - **Base Folder**: Root directory containing your portable OBS subfolders (defaults to `C:\obs-studio`).
 - **Backup Folder**: Destination folder for `.zip` config backups (defaults to `<Base Folder>\backups`).
