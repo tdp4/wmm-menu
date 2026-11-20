@@ -8,6 +8,12 @@ This has been written in python, and should be compiled using the included `buil
 
 ---
 
+# Voluntary AI Disclaimer
+
+This application was created with help from Google Antigravity and Gemini.  I, while a programmer, systems admin, and IT specialist, have used these tools to assist in bringing together information to build and create most of this code.  The workflow, process, and how OBS is used has been through years of running a media business, not by AI use.
+
+---
+
 ## Features
 
 - **Portable OBS Profiles**: Displays equal-width buttons for each configured OBS folder and automatically shows the detected `obs64.exe` product version (e.g., `[32.1.2]`).
@@ -37,7 +43,7 @@ The compiled `dist\wmm-menu.exe` is a standalone Windows 10/11 (64-bit) executab
 .\wmm-menu.exe --config C:\obs-studio\WesMasonMedia.yaml
 ```
 
-> **Tip**: Create Windows shortcuts (`.lnk`) pointing to `wmm-menu.exe` with different `.yaml` filenames to maintain separate menus (for example, `AcoustiCafe.yaml` and `WesMasonMedia.yaml`).
+> **Tip**: Create Windows shortcuts (`.lnk`) pointing to `wmm-menu.exe` with different `.yaml` filenames to maintain separate menus (for example, `client.yaml` and `mediacompany.yaml`).
 
 ### Main Menu Controls
 - **Main Button (`Name [Version]`)**: Stops sync services, backs up the OBS `config` folder to a timestamped `.zip`, and launches `bin\64bit\obs64.exe --portable --disable-updater`.
@@ -118,7 +124,7 @@ python wmm-menu.py --config path\to\custom-menu.yaml
 ```
 
 ### Compiling to `wmm-menu.exe`
-Run the included `build.bat` script from `C:\src\wmm-menu`:
+Run the included `build.bat` script from the folder:
 
 ```bat
 build.bat
@@ -134,3 +140,25 @@ What `build.bat` does:
    ```
 
 To deploy to another Windows 10/11 PC, simply copy `dist\wmm-menu.exe` (and optionally your `menu.yaml`) to any folder on that machine.
+
+## How I Use It
+
+My workflow consists of me having a folder on my home desktop in `C:\obs-studio`.  This folder is synced to all my event laptops using software like Syncthing` or Resilio Sync.  The folder contains a few sub-folders:
+- installer - contains things I may need to install on a new laptop to get it ready
+- assets - contains assets I use at events
+- backups - contains backups of configs for each OBS instance
+- OBS Folders - there is one of these per OBS I use.
+
+Installers for me are grouped by OBS version or task into sub-folders in `installer`.  This helps me find what works for what task.  Over time my OBS folders have slowly grown and not all are on the latest version.
+
+Assets are typically broken up by client.  In OBS I typically create a Scene collection per client.  I also contain one folder with my company's media.
+
+Backups is populated every time I run an OBS via this menu.  This became important when I began running into an issue where I had configurations not properly backed up after small edits.  Backups typically skip most known cache files so they are quick and barely slow you down, worth it if you are on site and trying to remember how something was setup in the past.
+
+The OBS folders are subfolders you unzip OBS into.  I typically prefix them with `OBS-` to make it wasy to pick them out.  Create a sub-folder (ex: `OBS-EventSpace`) and unzip the contents of an obs portable release.  You can also install OBS directly to that folder if you need to.  Please note that if you also want an OBS on your machine outside of thie menu that is not a portable install, this will typically direct some plugin installers to use this folder instead.  This is both helpful and a problem depending on how you want to use OBS.
+
+Each portable OBS folder contains everything OBS needs and any plugins you have also placed in there.  Please follow the directions closely for each plugin to do a proper portable install.  Plugins like DistroAV need external installers like NDI Tools and that installer you should place in `installer` to run on your remote used machine.
+
+If you take the time to put things in the right spot, recovering from almost any issue on site should be possible, not fun, but possible.
+
+Note: Make sure your devices finish syncing all changes you make before you leave for the event.  Having files on multiple devices can save you if one device did not finish but another did.
