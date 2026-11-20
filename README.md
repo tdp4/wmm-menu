@@ -60,9 +60,11 @@ The compiled `dist\wmm-menu.exe` is a standalone Windows 10/11 (64-bit) executab
 - **Base Folder**: Root directory containing your portable OBS subfolders (defaults to `C:\obs-studio`).
 - **Backup Folder**: Destination folder for `.zip` config backups (defaults to `<Base Folder>\backups`).
 - **Exclude volatile caches & logs**: Skips `obs-browser` caches, `logs`, `crashes`, `profiler_data`, and `updates` during backup (enabled by default).
+- **Run this menu automatically when user logs in**: Registers/removes a per-user Windows login entry (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) pointing to `wmm-menu` with `--config <your-yaml-path>`.
 - **Menu Buttons**:
   - Click **+ Add** to add a new OBS button (auto-detects subfolders under Base Folder containing `bin\64bit\obs64.exe`).
-  - Use **`▲`** / **`▼`** to reorder buttons, **Edit** to rename or change subfolders, or **`✕`** to remove an item.
+  - Click **+ Divider** to insert a horizontal divider line between groups of buttons.
+  - Use **`▲`** / **`▼`** to reorder buttons and dividers together, **Edit** to rename or change subfolders, or **`✕`** to remove an item.
   - Click **Save** to write changes to the YAML file and resize the menu automatically.
 - **Grant Start/Stop Service Permissions (Admin)**: Prompts once for Administrator elevation (UAC) and updates the Windows service ACL (`sc.exe sdset`) for installed `syncthing` / `rslsyncsvc` services so the current Windows user can start and stop them without UAC prompts during normal use. *(SyncTrayzor runs in user space and does not require Admin permissions.)*
 
@@ -77,6 +79,7 @@ backup_exclude_caches: true
 items:
   - name: Funhouse
     subfolder: OBS-Acousticafe-32.1-funhouse
+  - type: divider
   - name: WMM Special 32
     subfolder: OBS-WMM-Special-32
 ```

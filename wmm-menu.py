@@ -138,6 +138,17 @@ INFINITE = 0xFFFFFFFF
 TH32CS_SNAPPROCESS = 0x00000002
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 SPI_GETWORKAREA = 0x0030
+MONITOR_DEFAULTTONEAREST = 0x00000002
+MDT_EFFECTIVE_DPI = 0
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
 
 
 class PROCESSENTRY32W(ctypes.Structure):
@@ -193,6 +204,23 @@ if sys.platform == "win32":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
     _version_dll = ctypes.WinDLL("version", use_last_error=True)
+    try:
+        _shcore: ctypes.WinDLL | None = ctypes.WinDLL("shcore", use_last_error=True)
+        _shcore.GetDpiForMonitor.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.POINTER(wintypes.UINT),
+            ctypes.POINTER(wintypes.UINT),
+        ]
+        _shcore.GetDpiForMonitor.restype = ctypes.c_long
+    except OSError:
+        _shcore = None
+
+    _user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+    _user32.MonitorFromPoint.restype = wintypes.HANDLE
+
+    _user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MONITORINFO)]
+    _user32.GetMonitorInfoW.restype = wintypes.BOOL
 
     _user32.SystemParametersInfoW.argtypes = [
         wintypes.UINT,
@@ -777,6 +805,67 @@ exit 0
 # Configuration Management
 # ---------------------------------------------------------------------------
 
+def is_divider_item(item: dict[str, str]) -> bool:
+    """Return True if a menu config entry represents a visual horizontal divider."""
+    return str(item.get("type", "")).lower() == "divider"
+
+
+class StartupManager:
+    """Manage per-user Windows login startup via HKCU\\...\\CurrentVersion\\Run."""
+
+    RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+    @staticmethod
+    def _value_name(config_path: Path) -> str:
+        if config_path.name.lower() == DEFAULT_CONFIG_FILENAME.lower():
+            return "WMM-Menu"
+        return f"WMM-Menu ({config_path.stem})"
+
+    @staticmethod
+    def _build_command(config_path: Path) -> str:
+        cfg_abs = str(config_path.resolve())
+        if getattr(sys, "frozen", False):
+            exe_abs = str(Path(sys.executable).resolve())
+            return f'"{exe_abs}" --config "{cfg_abs}"'
+        py_exe = Path(sys.executable).resolve()
+        pyw_exe = py_exe.with_name("pythonw.exe")
+        runner = pyw_exe if pyw_exe.is_file() else py_exe
+        script_abs = str(Path(__file__).resolve())
+        return f'"{runner}" "{script_abs}" --config "{cfg_abs}"'
+
+    @classmethod
+    def is_enabled(cls, config_path: Path) -> bool:
+        if sys.platform != "win32":
+            return False
+        name = cls._value_name(config_path)
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, cls.RUN_KEY_PATH, 0, winreg.KEY_READ
+            ) as key:
+                val, _ = winreg.QueryValueEx(key, name)
+                return bool(str(val).strip())
+        except OSError:
+            return False
+
+    @classmethod
+    def set_enabled(cls, config_path: Path, enabled: bool) -> None:
+        if sys.platform != "win32":
+            return
+        name = cls._value_name(config_path)
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER, cls.RUN_KEY_PATH, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            if enabled:
+                winreg.SetValueEx(
+                    key, name, 0, winreg.REG_SZ, cls._build_command(config_path)
+                )
+            else:
+                try:
+                    winreg.DeleteValue(key, name)
+                except FileNotFoundError:
+                    pass
+
+
 class ConfigManager:
     """Loads and saves YAML configuration for wmm-menu."""
 
@@ -820,7 +909,11 @@ class ConfigManager:
         self.items = []
         if isinstance(raw_items, list):
             for entry in raw_items:
-                if isinstance(entry, dict) and entry.get("name") and entry.get("subfolder"):
+                if not isinstance(entry, dict):
+                    continue
+                if is_divider_item(entry):
+                    self.items.append({"type": "divider"})
+                elif entry.get("name") and entry.get("subfolder"):
                     self.items.append(
                         {
                             "name": str(entry["name"]),
@@ -1178,6 +1271,56 @@ class ToolTip:
                 pass
             self._after_id = None
 
+    @staticmethod
+    def _get_display_scale_and_bounds(
+        px: int, py: int, widget: tk.Misc
+    ) -> tuple[float, tuple[int, int, int, int]]:
+        """Return (dpi_scale, (left, top, right, bottom)) for the monitor at (px, py)."""
+        ctk_scale = float(getattr(widget, "_get_widget_scaling", lambda: 1.0)() or 1.0)
+        dpi_scale = ctk_scale
+        bounds = (0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight())
+
+        if sys.platform == "win32":
+            hmon = _user32.MonitorFromPoint(wintypes.POINT(px, py), MONITOR_DEFAULTTONEAREST)
+            if hmon:
+                mi = MONITORINFO()
+                mi.cbSize = ctypes.sizeof(MONITORINFO)
+                if _user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                    bounds = (
+                        mi.rcWork.left,
+                        mi.rcWork.top,
+                        mi.rcWork.right,
+                        mi.rcWork.bottom,
+                    )
+                if _shcore is not None:
+                    xdpi = wintypes.UINT(96)
+                    ydpi = wintypes.UINT(96)
+                    if (
+                        _shcore.GetDpiForMonitor(
+                            hmon, MDT_EFFECTIVE_DPI, ctypes.byref(xdpi), ctypes.byref(ydpi)
+                        )
+                        == 0
+                        and xdpi.value > 0
+                    ):
+                        dpi_scale = max(dpi_scale, (xdpi.value + ydpi.value) / 192.0)
+
+            # Also respect Windows Accessibility 'Text size' slider if set > 100%
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Accessibility",
+                    0,
+                    winreg.KEY_READ,
+                ) as key:
+                    tsf, _ = winreg.QueryValueEx(key, "TextScaleFactor")
+                    text_factor = float(tsf) / 100.0
+                    if text_factor > 1.0:
+                        dpi_scale *= text_factor
+            except OSError:
+                pass
+
+        return max(1.0, dpi_scale), bounds
+
     def _show(self) -> None:
         self._after_id = None
         if not self.widget.winfo_exists() or self._tip_win is not None:
@@ -1189,6 +1332,18 @@ class ToolTip:
         fg_text = "#f0f6fc" if is_dark else "#ffffff"
 
         px, py = self.widget.winfo_pointerxy()
+        scale, (m_left, m_top, m_right, m_bottom) = self._get_display_scale_and_bounds(
+            px, py, self.widget
+        )
+
+        font_px = -max(12, round(12 * scale))
+        pad_x = max(6, round(10 * scale))
+        pad_y = max(3, round(5 * scale))
+        border_px = max(1, round(1 * scale))
+        off_x = round(12 * scale)
+        off_y = round(20 * scale)
+        margin = round(8 * scale)
+
         tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
         try:
@@ -1203,22 +1358,20 @@ class ToolTip:
             text=self.text,
             bg=bg_inner,
             fg=fg_text,
-            font=("Segoe UI", 9),
-            padx=8,
-            pady=4,
+            font=("Segoe UI", font_px),
+            padx=pad_x,
+            pady=pad_y,
         )
-        lbl.pack(padx=1, pady=1)
+        lbl.pack(padx=border_px, pady=border_px)
 
         tw.update_idletasks()
         tip_w = tw.winfo_reqwidth()
         tip_h = tw.winfo_reqheight()
-        scr_w = tw.winfo_screenwidth()
-        scr_h = tw.winfo_screenheight()
 
-        x = min(max(4, px + 10), max(4, scr_w - tip_w - 8))
-        y = py + 18
-        if y + tip_h > scr_h - 8:
-            y = max(4, py - tip_h - 8)
+        x = min(max(m_left + 4, px + off_x), max(m_left + 4, m_right - tip_w - margin))
+        y = py + off_y
+        if y + tip_h > m_bottom - margin:
+            y = max(m_top + 4, py - tip_h - margin)
 
         tw.wm_geometry(f"+{x}+{y}")
         self._tip_win = tw
@@ -1416,8 +1569,8 @@ class ConfigDialog(ctk.CTkToplevel):
         self._items_draft: list[dict[str, str]] = [dict(it) for it in config.items]
 
         self.title("Configuration")
-        self.geometry("580x560")
-        self.minsize(520, 480)
+        self.geometry("580x595")
+        self.minsize(520, 510)
         self.resizable(True, True)
         apply_window_icon(self)
         self.transient(master)
@@ -1426,7 +1579,7 @@ class ConfigDialog(ctk.CTkToplevel):
         frame = ctk.CTkFrame(self, fg_color="transparent")
         frame.pack(fill=tk.BOTH, expand=True, padx=18, pady=14)
         frame.columnconfigure(1, weight=1)
-        frame.rowconfigure(7, weight=1)
+        frame.rowconfigure(8, weight=1)
 
         ctk.CTkLabel(
             frame,
@@ -1508,11 +1661,19 @@ class ConfigDialog(ctk.CTkToplevel):
             text="Exclude volatile caches & logs from backups (obs-browser cache, logs, crashes)",
             variable=self.exclude_caches_var,
             font=ctk.CTkFont(family="Segoe UI", size=12),
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 8))
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 4))
 
-        # Menu Buttons Section (Add / Edit / Remove / Reorder)
+        self.run_at_login_var = tk.BooleanVar(value=StartupManager.is_enabled(config.path))
+        ctk.CTkCheckBox(
+            frame,
+            text="Run this menu automatically when user logs in",
+            variable=self.run_at_login_var,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(2, 8))
+
+        # Menu Buttons Section (Add / Divider / Edit / Remove / Reorder)
         order_hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        order_hdr.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(2, 4))
+        order_hdr.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(2, 4))
         order_hdr.columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
@@ -1524,6 +1685,22 @@ class ConfigDialog(ctk.CTkToplevel):
 
         ctk.CTkButton(
             order_hdr,
+            text="+ Divider",
+            width=78,
+            height=BTN_HEIGHT,
+            border_spacing=1,
+            corner_radius=5,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color=COLOR_MAIN_BTN_BG,
+            hover_color=COLOR_MAIN_BTN_HOVER,
+            text_color=COLOR_MAIN_BTN_TEXT,
+            border_width=1,
+            border_color=COLOR_CARD_BORDER,
+            command=self._add_divider_draft,
+        ).grid(row=0, column=1, sticky="e", padx=(0, 6))
+
+        ctk.CTkButton(
+            order_hdr,
             text="+ Add",
             width=72,
             height=BTN_HEIGHT,
@@ -1531,7 +1708,7 @@ class ConfigDialog(ctk.CTkToplevel):
             corner_radius=5,
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             command=self._open_add_item,
-        ).grid(row=0, column=1, sticky="e")
+        ).grid(row=0, column=2, sticky="e")
 
         self.order_list = ctk.CTkScrollableFrame(
             frame,
@@ -1541,15 +1718,15 @@ class ConfigDialog(ctk.CTkToplevel):
             border_color=COLOR_CARD_BORDER,
             corner_radius=8,
         )
-        self.order_list.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(0, 10))
+        self.order_list.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=(0, 10))
         self._render_order_list()
 
         ctk.CTkFrame(frame, height=1, fg_color=COLOR_DIVIDER).grid(
-            row=8, column=0, columnspan=3, sticky="ew", pady=(2, 10)
+            row=9, column=0, columnspan=3, sticky="ew", pady=(2, 10)
         )
 
         perm_row = ctk.CTkFrame(frame, fg_color="transparent")
-        perm_row.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        perm_row.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         self.grant_btn = ctk.CTkButton(
             perm_row,
             text="Grant Start/Stop Service Permissions (Admin)",
@@ -1570,7 +1747,7 @@ class ConfigDialog(ctk.CTkToplevel):
         ).pack(side=tk.LEFT, padx=(10, 0))
 
         btn_row = ctk.CTkFrame(frame, fg_color="transparent")
-        btn_row.grid(row=10, column=0, columnspan=3, sticky="e", pady=(4, 0))
+        btn_row.grid(row=11, column=0, columnspan=3, sticky="e", pady=(4, 0))
         ctk.CTkButton(
             btn_row,
             text="Cancel",
@@ -1610,22 +1787,31 @@ class ConfigDialog(ctk.CTkToplevel):
 
         total = len(self._items_draft)
         for idx, item in enumerate(self._items_draft):
+            divider_entry = is_divider_item(item)
             row = ctk.CTkFrame(
                 self.order_list,
                 height=BTN_HEIGHT + 2,
                 corner_radius=5,
-                fg_color=COLOR_MAIN_BTN_BG,
+                fg_color=COLOR_CARD_BG if divider_entry else COLOR_MAIN_BTN_BG,
+                border_width=1 if divider_entry else 0,
+                border_color=COLOR_CARD_BORDER,
             )
             row.pack(fill=tk.X, pady=2, padx=2)
             row.columnconfigure(0, weight=1)
             for col in (1, 2, 3, 4):
                 row.columnconfigure(col, weight=0)
 
+            label_text = (
+                f"  {idx + 1}.   ────────  Divider  ────────"
+                if divider_entry
+                else f"  {idx + 1}.  {item['name']}   ({item['subfolder']})"
+            )
             ctk.CTkLabel(
                 row,
-                text=f"  {idx + 1}.  {item['name']}   ({item['subfolder']})",
+                text=label_text,
                 height=BTN_HEIGHT,
                 anchor="w",
+                text_color=COLOR_TEXT_MUTED if divider_entry else COLOR_MAIN_BTN_TEXT,
                 font=ctk.CTkFont(family="Segoe UI", size=12),
             ).grid(row=0, column=0, sticky="ew", padx=(4, 6), pady=1)
 
@@ -1663,19 +1849,20 @@ class ConfigDialog(ctk.CTkToplevel):
                 command=lambda i=idx: self._move_item(i, 1),
             ).grid(row=0, column=2, padx=(0, 3), pady=2)
 
-            ctk.CTkButton(
-                row,
-                text="Edit",
-                width=38,
-                height=BTN_HEIGHT - 2,
-                border_spacing=0,
-                corner_radius=4,
-                font=ctk.CTkFont(family="Segoe UI", size=11),
-                fg_color=COLOR_FAST_BTN_BG,
-                hover_color=COLOR_MAIN_BTN_HOVER,
-                text_color=COLOR_MAIN_BTN_TEXT,
-                command=lambda i=idx: self._edit_item_draft(i),
-            ).grid(row=0, column=3, padx=(0, 3), pady=2)
+            if not divider_entry:
+                ctk.CTkButton(
+                    row,
+                    text="Edit",
+                    width=38,
+                    height=BTN_HEIGHT - 2,
+                    border_spacing=0,
+                    corner_radius=4,
+                    font=ctk.CTkFont(family="Segoe UI", size=11),
+                    fg_color=COLOR_FAST_BTN_BG,
+                    hover_color=COLOR_MAIN_BTN_HOVER,
+                    text_color=COLOR_MAIN_BTN_TEXT,
+                    command=lambda i=idx: self._edit_item_draft(i),
+                ).grid(row=0, column=3, padx=(0, 3), pady=2)
 
             ctk.CTkButton(
                 row,
@@ -1690,6 +1877,10 @@ class ConfigDialog(ctk.CTkToplevel):
                 text_color=COLOR_SVC_STOP_TEXT,
                 command=lambda i=idx: self._remove_item_draft(i),
             ).grid(row=0, column=4, padx=(0, 3), pady=2)
+
+    def _add_divider_draft(self) -> None:
+        self._items_draft.append({"type": "divider"})
+        self._render_order_list()
 
     def _open_add_item(self) -> None:
         base = self.base_var.get().strip() or DEFAULT_BASE_FOLDER
@@ -1809,6 +2000,17 @@ class ConfigDialog(ctk.CTkToplevel):
         except OSError as exc:
             messagebox.showerror("Save Error", f"Failed to save config:\n{exc}", parent=self)
             return
+
+        try:
+            StartupManager.set_enabled(
+                self.config_mgr.path, bool(self.run_at_login_var.get())
+            )
+        except OSError as exc:
+            messagebox.showwarning(
+                "Startup Setting Error",
+                f"Saved config, but failed to update Windows login startup registry:\n{exc}",
+                parent=self,
+            )
 
         self.on_saved()
         self.destroy()
@@ -2167,6 +2369,23 @@ class WmmMenuApp:
             running_snapshot = set(self._running_items)
 
         for idx, item in enumerate(self.config_mgr.items):
+            if is_divider_item(item):
+                div_wrap = ctk.CTkFrame(self.items_frame, height=14, fg_color="transparent")
+                div_wrap.pack(fill=tk.X, pady=3, padx=6)
+                div_line = ctk.CTkFrame(
+                    div_wrap,
+                    height=2,
+                    corner_radius=1,
+                    fg_color=COLOR_DIVIDER,
+                )
+                div_line.pack(fill=tk.X, pady=5)
+                for w in (div_wrap, div_line):
+                    w.bind(
+                        "<Button-3>",
+                        lambda e, i=idx: self._show_item_context_menu(e, i),
+                    )
+                continue
+
             key = self._item_key(item)
             is_running = key in running_snapshot
 
@@ -2227,9 +2446,12 @@ class WmmMenuApp:
 
     def _show_item_context_menu(self, event: tk.Event, index: int) -> None:
         item = self.config_mgr.items[index]
-        key = self._item_key(item)
-        with self._state_lock:
-            is_running = key in self._running_items
+        divider_entry = is_divider_item(item)
+        is_running = False
+        if not divider_entry:
+            key = self._item_key(item)
+            with self._state_lock:
+                is_running = key in self._running_items
 
         is_dark = ctk.get_appearance_mode().lower() == "dark"
         menu = tk.Menu(
@@ -2240,13 +2462,14 @@ class WmmMenuApp:
             activebackground="#1f6feb" if is_dark else "#dce6f4",
             activeforeground="#ffffff" if is_dark else "#1f2328",
         )
+        if not divider_entry:
+            menu.add_command(
+                label="Edit...",
+                state="disabled" if is_running else "normal",
+                command=lambda: self._open_edit_dialog(index),
+            )
         menu.add_command(
-            label="Edit...",
-            state="disabled" if is_running else "normal",
-            command=lambda: self._open_edit_dialog(index),
-        )
-        menu.add_command(
-            label="Remove",
+            label="Remove Divider" if divider_entry else "Remove",
             state="disabled" if is_running else "normal",
             command=lambda: self._remove_item(index),
         )
@@ -2279,6 +2502,11 @@ class WmmMenuApp:
 
     def _remove_item(self, index: int) -> None:
         item = self.config_mgr.items[index]
+        if is_divider_item(item):
+            self.config_mgr.items.pop(index)
+            self.config_mgr.save()
+            self._render_menu_items()
+            return
         if messagebox.askyesno(
             "Remove Item",
             f"Remove '{item['name']}' from the menu?",
